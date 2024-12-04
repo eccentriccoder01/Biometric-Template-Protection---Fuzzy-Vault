@@ -1,156 +1,258 @@
+# ============================================
+# 1. IMPORTS AND GLOBAL VARIABLES
+# ============================================
+
 import numpy as np
-import cv2    
-import math
-import fingerprint_enhancer as fe
+import cv2
 from skimage.morphology import skeletonize
-from scipy.spatial import distance
-from sklearn.preprocessing import MinMaxScaler
-import galois
-from crc import Calculator, Crc16
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+import joblib
+import os
 import matplotlib.pyplot as plt
 import warnings
-import binascii
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from sklearn.model_selection import GridSearchCV
+from PIL import Image, ImageTk
 
-block_size = 16
 warnings.filterwarnings("ignore")
-r = 20 #Minutiae Points
-s = 180 #Chaff Points
+
+BLOCK_SIZE = 16
+R = 20           # Number of Minutiae points
+S = 180          # Number of Chaff points
+
+# ============================================
+# 2. PREPROCESSING AND FEATURE EXTRACTION
+# ============================================
 
 def do_segmentation(img):
-    shap = img.shape
-    segmented_image = img.copy()
-    seg_mask = np.ones(shap)
+    shape = img.shape
+    seg_mask = np.ones(shape)
     threshold = np.var(img) * 0.1
-    row, col = img.shape
-    for i in range(0, row, block_size):
-        for j in range(0, col, block_size):
-            x, y = min(row, i + block_size), min(col, j + block_size)
-            loc_gs_var = np.var(img[i:x, j:y])
-            if loc_gs_var <= threshold:
+    for i in range(0, img.shape[0], BLOCK_SIZE):
+        for j in range(0, img.shape[1], BLOCK_SIZE):
+            x, y = min(img.shape[0], i + BLOCK_SIZE), min(img.shape[1], j + BLOCK_SIZE)
+            if np.var(img[i:x, j:y]) <= threshold:
                 seg_mask[i:x, j:y] = 0
-    var = cv2.getStructuringElement(cv2.MORPH_RECT, (block_size * 2, block_size * 2))
-    seg_mask = cv2.erode(seg_mask, var, iterations=1)   
-    seg_mask = cv2.dilate(seg_mask, var, iterations=1)
-    segmented_image[seg_mask == 0] = 255
-    return segmented_image
+    return np.where(seg_mask == 0, 255, img)
 
 def do_normalization(segmented_image):
     desired_mean, desired_variance = 100.0, 8000.0
-    estimated_mean, estimated_variance = np.mean(segmented_image), np.var(segmented_image)
-    normalized_image = np.where(segmented_image > estimated_mean,
-                                np.sqrt((segmented_image - estimated_mean)**2 * (desired_variance / estimated_variance)) + desired_mean,
-                                desired_mean - np.sqrt((segmented_image - estimated_mean)**2 * (desired_variance / estimated_variance)))
-    return normalized_image
-
-def do_enhancement(normalized_image):
-    return fe.enhance_Fingerprint(normalized_image)
-
-def do_binarization(enhanced_image):
-    _, binarized_image = cv2.threshold(enhanced_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binarized_image
+    mean, variance = np.mean(segmented_image), np.var(segmented_image)
+    normalized_image = (segmented_image - mean) * (desired_variance / variance)**0.5 + desired_mean
+    return cv2.normalize(normalized_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
 def do_thinning(binarized_image):
-    return np.where(skeletonize(binarized_image / 255), 0.0, 1.0)
-
-def preprocessing(img):
-    segmented_image = do_segmentation(img)
-    normalized_image = do_normalization(segmented_image)
-    enhanced_image = do_enhancement(normalized_image)
-    binarized_image = do_binarization(enhanced_image)
-    thinned_image = do_thinning(binarized_image)
-    return img, thinned_image
-
-def ridge_orientation(img, thinned_image):
-    scale, delta = 1, 0
-    bs = (block_size * 2) + 1
-    G_x = cv2.Sobel(thinned_image / 255, cv2.CV_64F, 0, 1, ksize=3, scale=scale, delta=delta)
-    G_y = cv2.Sobel(thinned_image / 255, cv2.CV_64F, 1, 0, ksize=3, scale=scale, delta=delta)
-    gaussian_directions_x = cv2.GaussianBlur(G_x, (bs, bs), 1.0)
-    gaussian_directions_y = cv2.GaussianBlur(G_y, (bs, bs), 1.0)
-    orientation_map = 0.5 * (np.arctan2(gaussian_directions_x, gaussian_directions_y)) + (0.5 * np.pi)
-    return orientation_map
-
-def crossing_number(i, j, thinned_image):
-    if thinned_image[i, j] != 0.0:
-        return 2.0
-    sum_val = 0.0
-    offsets = [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
-    pixel_values = [thinned_image[i+x, j+y] for x, y in offsets]
-    sum_val += np.sum(np.abs(np.diff(pixel_values)))
-    return sum_val // 2
-
-def false_minutiae_removal(img, thinned_image):
-    global_grayscale_variance = np.var(thinned_image) * 0.1
-    seg_mask = np.zeros_like(thinned_image)
-    for i in range(0, img.shape[0], block_size):
-        for j in range(0, img.shape[1], block_size):
-            local_grayscale_variance = np.var(thinned_image[i:i + block_size, j:j + block_size])
-            if local_grayscale_variance > global_grayscale_variance:
-                seg_mask[i:i + block_size, j:j + block_size] = 1
-    return seg_mask
-
-def minutiae(img, thinned_image, orientation_map):
-    minutiae_points = {}
-    for i in range(1, img.shape[0] - 1):
-        for j in range(1, img.shape[1] - 1):
-            cn = crossing_number(i, j, thinned_image)
-            if cn in [1, 3]:
-                minutiae_points[(i, j)] = (cn, orientation_map[i, j])
-    seg_mask = false_minutiae_removal(img, thinned_image)
-    return minutiae_points
+    return np.where(skeletonize(binarized_image / 255), 0, 1).astype(np.uint8)
 
 def minutiae_points_computer(img):
-    img, thinned_image = preprocessing(img)
-    orientation_map = ridge_orientation(img, thinned_image)
-    minutiae_points = minutiae(img, thinned_image, orientation_map)
+    segmented = do_segmentation(img)
+    normalized = do_normalization(segmented)
+    _, binarized = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thinned = do_thinning(binarized)
+    minutiae_points = {
+        (i, j): (0, 1) for i in range(thinned.shape[0]) for j in range(thinned.shape[1]) if thinned[i, j] == 0
+    }
     return minutiae_points
 
-def vault_constructor(minutiae_points, img):
-    X_orig = np.array([key[0] for key in minutiae_points.keys()][:r])
-    Y_orig = np.array([key[1] for key in minutiae_points.keys()][:r])
-    Theta_orig = np.round(np.array([value[1] for value in minutiae_points.values()][:r]) * 100).astype(int)
-    if len(X_orig) < r:
-        print("Not enough minutiae points")
-        return None, None
-    
-    scaler_x = MinMaxScaler((0, 2**6))
-    scaler_y = MinMaxScaler((0, 2**6))
-    scaler_theta = MinMaxScaler((0, 2**4))
-    
-    X_encoded = scaler_x.fit_transform(X_orig.reshape(-1, 1)).flatten().astype(int)
-    Y_encoded = scaler_y.fit_transform(Y_orig.reshape(-1, 1)).flatten().astype(int)
-    Theta_encoded = scaler_theta.fit_transform(Theta_orig.reshape(-1, 1)).flatten().astype(int)
-    
-    GF = galois.GF(2**16)
-    key = np.random.randint(2, size=16*16, dtype='uint16')
-    crc_input = key.tobytes()
-    crcsum = binascii.crc_hqx(crc_input, 0xFFFF)
-    
-    key_dash = np.concatenate((key, np.fromiter(f"{crcsum:016b}", dtype=int)))
-    num_groups = len(key_dash) // 16
-    key_final = [int(''.join(map(str, key_dash[16*i:16*(i+1)])), 2) for i in range(num_groups)]
-    
-    encode_poly = galois.Poly(key_final, field=GF)
+def generate_feature_vector(minutiae_points):
+    return np.array([[x, y, orientation] for (x, y), (_, orientation) in minutiae_points.items()]).flatten()
 
-    vault = {}
-    for i in range(r):
-        vault[(X_orig[i], Y_orig[i], Theta_orig[i])] = (int(X_encoded[i]), int(Y_encoded[i]), int(Theta_encoded[i]))
-    return vault, (X_orig, Y_orig)
+def pad_feature_vectors(feature_vectors, max_length):
+    return np.array([np.pad(vector, (0, max_length - len(vector))) if len(vector) < max_length else vector[:max_length] for vector in feature_vectors])
 
+# ============================================
+# 3. DATASET PREPARATION
+# ============================================
+
+def load_dataset(dataset_dir, is_fingerprint=True):
+    feature_vectors, labels = [], []
+    label = 0
+
+    subdirs = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
+    if not subdirs:
+        raise ValueError(f"No subdirectories found in {dataset_dir}. Ensure the directory is structured correctly.")
+
+    for subdir in sorted(subdirs):
+        subdir_path = os.path.join(dataset_dir, subdir)
+        for img_file in sorted(os.listdir(subdir_path)):
+            img_path = os.path.join(subdir_path, img_file)
+            if not img_file.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg')):
+                print(f"Skipping non-image file: {img_path}")
+                continue
+
+            img = cv2.imread(img_path, 0)
+            if img is None:
+                print(f"Invalid or unreadable image: {img_path}")
+                continue
+
+            try:
+                print(f"Processing image: {img_path}")
+                minutiae_points = minutiae_points_computer(img)
+                if not minutiae_points:
+                    print(f"No minutiae points detected: {img_path}")
+                    continue
+                feature_vector = generate_feature_vector(minutiae_points)
+                if feature_vector.size > 0:
+                    feature_vectors.append(feature_vector)
+                    labels.append(label)
+                else:
+                    print(f"Empty feature vector: {img_path}")
+            except Exception as e:
+                print(f"Error processing {img_path}: {e}")
+
+        label += 1
+
+    if not feature_vectors:
+        raise ValueError(f"No valid feature vectors generated from dataset in {dataset_dir}. Check your images or processing pipeline.")
+
+    max_length = max(len(v) for v in feature_vectors)
+    feature_vectors = pad_feature_vectors(feature_vectors, max_length)
+
+    return np.array(feature_vectors), np.array(labels)
+
+# ============================================
+# 4. TRAINING AND RECOGNITION
+# ============================================
+
+def train_recognition_system(X_train, y_train):
+    unique_classes = np.unique(y_train)
+    if len(unique_classes) < 2:
+        raise ValueError(f"Training data must contain at least two classes. Found {len(unique_classes)} class(es).")
+    
+    clf = SVC(probability=True)
+    param_grid = {
+        'C': [0.1, 1, 10],
+        'kernel': ['linear', 'rbf'],
+        'gamma': ['scale', 'auto']
+    }
+    grid_search = GridSearchCV(clf, param_grid, cv=5, scoring='accuracy')
+    grid_search.fit(X_train, y_train)
+    print(f"Best Parameters: {grid_search.best_params_}")
+    clf_best = grid_search.best_estimator_
+    joblib.dump(clf_best, 'recognition_model.pkl')
+    return clf_best
+
+def evaluate_recognition_system(clf, X_test, y_test, dataset_type):
+    accuracy = accuracy_score(y_test, clf.predict(X_test)) * 100
+    print(f"{dataset_type} Recognition Accuracy: {accuracy:.2f}%")
+    show_accuracy_window(accuracy, dataset_type)
+    return accuracy
+
+# ============================================
+# 5. GUI, PLOT AND MAIN FUNCTION
+# ============================================
+
+def show_accuracy_window(accuracy, dataset_type):
+    window = tk.Tk()
+    window.title("Recognition Accuracy")
+    window.geometry("1000x600")
+
+    background_image_path = "Images/Template Protection.png"
+    try:
+        bg_image = Image.open(background_image_path)
+    except FileNotFoundError:
+        print(f"Error: Background image '{background_image_path}' not found.")
+        return
+
+    canvas = tk.Canvas(window, highlightthickness=0)
+    canvas.pack(fill="both", expand=True)
+
+    text_id = None
+    close_button_window = None
+
+    def resize_elements(event):
+        nonlocal text_id, close_button_window
+
+        new_width, new_height = event.width, event.height
+        resized_image = bg_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        canvas.bg_photo = ImageTk.PhotoImage(resized_image)
+        canvas.delete("all")
+        canvas.create_image(0, 0, anchor="nw", image=canvas.bg_photo)
+        text_id = canvas.create_text(
+            new_width // 2, int(new_height * 0.8),
+            text=f"{dataset_type} Recognition Accuracy\n{accuracy:.2f}%",
+            font=("Arial", 22),
+            fill="white",
+            anchor="center"
+        )
+        if close_button_window is None:
+            close_button = tk.Button(
+                window,
+                text="Close",
+                command=window.destroy,
+                font=("Arial", 12),
+                bg="#61dafb",
+                fg="#282c34",
+                padx=10,
+                pady=5
+            )
+            close_button_window = canvas.create_window(new_width // 2, new_height - 50, anchor="center", window=close_button)
+        else:
+            canvas.coords(close_button_window, new_width // 2, new_height - 50)
+    window.bind("<Configure>", resize_elements)
+
+    window.mainloop()
+    
+def plot_minutiae_points(img, minutiae_points):
+    plt.figure(figsize=(8, 8))
+    plt.imshow(img, cmap='gray')
+    minutiae_x = [y for x, y in minutiae_points]
+    minutiae_y = [x for x, y in minutiae_points]
+    plt.scatter(minutiae_x, minutiae_y, color='red', s=10)
+    plt.title("Minutiae Points on Fingerprint")
+    plt.show()
+
+def select_fingerprint_and_plot():
+    file_path = filedialog.askopenfilename(title="Select Fingerprint Image", filetypes=[("Image Files", "*.bmp;*.png;*.jpg;*.jpeg")])
+    if file_path:
+        img = cv2.imread(file_path, 0)
+        minutiae_points = minutiae_points_computer(img)
+        plot_minutiae_points(img, minutiae_points)
+    else:
+        messagebox.showwarning("File Selection", "No file selected. Please select a valid fingerprint image.")
 
 def main():
-    img_fp = cv2.imread("fingerprint.tif", 0)
-    minutiae_points_fp = minutiae_points_computer(img_fp)
-    Vault_fp, vault_fp_print = vault_constructor(minutiae_points_fp, img_fp)
-    
-    img_pp = cv2.imread("palmprint.tif", 0)
-    minutiae_points_pp = minutiae_points_computer(img_pp)
-    Vault_pp, vault_pp_print = vault_constructor(minutiae_points_pp, img_pp)
-    
-    x = np.concatenate((vault_fp_print[0], vault_pp_print[0]))
-    y = np.concatenate((vault_fp_print[1], vault_pp_print[1]))
-    plt.scatter(x, y)
-    plt.show()
-    
+    import os
+    base_fp_dir = os.path.join("fingerprint_dataset", "SOCOFing")
+    train_fp_dirs = ["Real", os.path.join("Altered", "Altered-Medium"), os.path.join("Altered", "Altered-Medium"), os.path.join("Altered", "Altered-Hard")]
+    test_fp_dir = os.path.join(base_fp_dir, "Altered", "Altered-Easy")
+    print("Loading fingerprint training datasets...")
+    fp_train_features, fp_train_labels = [], []
+    all_train_features = []
+
+    for train_dir in train_fp_dirs:
+        full_train_dir = os.path.join(base_fp_dir, train_dir)
+        features, labels = load_dataset(full_train_dir, is_fingerprint=True)
+        max_length_fp = max([len(vector) for vector in features])
+        padded_features = pad_feature_vectors(features, max_length_fp)
+        
+        fp_train_features.append(padded_features)
+        fp_train_labels.append(labels)
+        all_train_features.extend(padded_features)  # Flatten to get all features together
+
+    max_length_fp = max([len(vector) for vector in all_train_features])
+    X_train_fp = np.concatenate([pad_feature_vectors(features, max_length_fp) for features in fp_train_features], axis=0)
+    y_train_fp = np.concatenate(fp_train_labels, axis=0)
+    print("Loading fingerprint testing dataset...")
+    X_test_fp, y_test_fp = load_dataset(test_fp_dir, is_fingerprint=True)
+    X_test_fp = pad_feature_vectors(X_test_fp, max_length_fp)
+    print("Normalizing features...")
+    scaler = StandardScaler()
+    X_train_fp = scaler.fit_transform(X_train_fp)
+    X_test_fp = scaler.transform(X_test_fp)   
+    print("Training fingerprint recognition system...")
+    clf_fp = train_recognition_system(X_train_fp, y_train_fp)
+    print("Evaluating fingerprint recognition system...")
+    evaluate_recognition_system(clf_fp, X_test_fp, y_test_fp, "Fingerprint")
+
+root = tk.Tk()
+root.title("Fingerprint Recognition System")
+plot_button = tk.Button(root, text="Select and Plot Minutiae Points", command=select_fingerprint_and_plot)
+plot_button.pack(padx=20, pady=20)
+root.mainloop()
+
 if __name__ == "__main__":
     main()

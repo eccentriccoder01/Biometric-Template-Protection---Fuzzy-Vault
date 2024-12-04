@@ -10,3 +10,5 @@ pip install galois
 pip install crc
 pip install matplotlib
 pip install scikit-image
+pip install PIL
+pip install tkinter

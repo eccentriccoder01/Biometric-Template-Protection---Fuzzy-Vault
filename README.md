@@ -12,6 +12,8 @@ This repository implements a robust biometric security system utilising the Fuzz
 - **Minutiae Extraction:** Extracts minutiae points from processed biometric images and computes their positions and orientations.
 - **Vault Construction:** Uses the extracted minutiae points to construct a Fuzzy Vault, which includes encoding the minutiae data and generating a secure key using polynomial encryption.
 - **Visualisation:** Plots a 2D graph of the vault points for fingerprint and palmprint data.
+- **Recognition System:** Trains an SVM classifier with a hyperparameter grid search using cross-validation, Evaluates recognition accuracy on test datasets.
+
 
 ## Requirements
 
@@ -21,54 +23,54 @@ This repository implements a robust biometric security system utilising the Fuzz
 - scikit-image
 - scipy
 - scikit-learn
-- galois
+- joblib
 - crc
 - matplotlib
-- fingerprint_enhancer (custom module)
+- tkinter
+- PIL (Python Imaging Library)
 
 ## Installation
 
 To install the necessary Python packages, use pip:
 
 ```bash
-pip install numpy opencv-python scikit-image scipy scikit-learn galois crc matplotlib
+pip install numpy opencv-python scikit-image scikit-learn joblib matplotlib pillow
 ```
 
 ## Usage
 
-1. **Prepare your biometric images:**
-   Ensure that you have fingerprint and palmprint images in TIFF format named `fingerprint.tif` and `palmprint.tif`, respectively.
+1. **Prepare your Dataset:**
+
+   Organize fingerprint images in subdirectories within a dataset folder.
+   Each subdirectory represents a class/label.
 
 2. **Run the main script:**
 
    ```bash
-   python main.py
+   python fuzzy_vault.py
    ```
 
-   The script will process the images, compute minutiae points, construct the fuzzy vaults, and visualize the vault points in a 2D scatter plot.
+   The script opens the GUI for fingerprint minutiae plotting, processes the dataset, extracts features, trains an SVM model, and evaluates its performance.
 
 ## Code Explanation
 
 - **Preprocessing Functions:**
-  - `do_segmentation(img)`: Segments the image into regions of interest.
-  - `do_normalization(segmented_image)`: Normalizes the image to a desired mean and variance.
-  - `do_enhancement(normalized_image)`: Enhances the fingerprint image using the custom `fingerprint_enhancer` module.
-  - `do_binarization(enhanced_image)`: Binarizes the enhanced image using Otsu's thresholding.
-  - `do_thinning(binarized_image)`: Performs skeletonization to thin the binary image.
-  - `preprocessing(img)`: Combines all preprocessing steps.
-
-- **Minutiae Extraction:**
-  - `ridge_orientation(img, thinned_image)`: Computes the ridge orientation map.
-  - `crossing_number(i, j, thinned_image)`: Calculates the crossing number at a given pixel.
-  - `false_minutiae_removal(img, thinned_image)`: Removes false minutiae based on grayscale variance.
-  - `minutiae(img, thinned_image, orientation_map)`: Extracts minutiae points with their orientation.
-  - `minutiae_points_computer(img)`: Computes minutiae points for a given image.
-
-- **Vault Construction:**
-  - `vault_constructor(minutiae_points, img)`: Constructs the fuzzy vault and encodes minutiae points.
-
+  - `do_segmentation(img)`: Segments the image into blocks and removes low-variance regions.
+  - `do_normalization(segmented_image)`: Normalizes image intensity to a desired mean and variance.
+  - `do_thinning(binarized_image)`: Thins the binary image using skeletonization.
+- **Feature Extraction:**
+  - `minutiae_points_computer(img)`: Extracts minutiae points from the fingerprint image.
+  - `generate_feature_vector(minutiae_points)`: Converts minutiae points into a feature vector.
+  - `pad_feature_vectors(feature_vectors, max_length)`: Ensures uniform feature vector lengths.
+- **Dataset Handling:**
+  - `load_dataset(dataset_dir, is_fingerprint=True)`: Loads fingerprint images, processes them, and generates feature vectors.
+- **Training and Evaluation:**
+  - `train_recognition_system(X_train, y_train)`: Trains an SVM classifier using GridSearchCV.
+  - `evaluate_recognition_system(clf, X_test, y_test, dataset_type)`: Evaluates recognition accuracy on the test dataset.
 - **Visualization:**
-  - `main()`: Reads biometric images, computes minutiae points, constructs fuzzy vaults, and plots the 2D graph of vault points.
+  - `plot_minutiae_points(img, minutiae_points)`: Visualizes minutiae points on the fingerprint image.
+- **Graphical Interface:**
+  - GUI to select a fingerprint image and visualize its minutiae points.
 
 ## Contributing
 

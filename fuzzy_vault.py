@@ -13,7 +13,7 @@ import os
 import matplotlib.pyplot as plt
 import warnings
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
 from sklearn.model_selection import GridSearchCV
 from PIL import Image, ImageTk
 
@@ -61,8 +61,10 @@ def generate_feature_vector(minutiae_points):
     return np.array([[x, y, orientation] for (x, y), (_, orientation) in minutiae_points.items()]).flatten()
 
 def pad_feature_vectors(feature_vectors, max_length):
-    return np.array([np.pad(vector, (0, max_length - len(vector))) if len(vector) < max_length else vector[:max_length] for vector in feature_vectors])
-
+    return np.array(
+        [np.pad(vector, (0, max_length - len(vector))) if len(vector) < max_length else vector[:max_length] for vector in feature_vectors],
+        dtype=np.int32  # Use a smaller data type
+    )
 # ============================================
 # 3. DATASET PREPARATION
 # ============================================
@@ -206,7 +208,7 @@ def plot_minutiae_points(img, minutiae_points):
     plt.show()
 
 def select_fingerprint_and_plot():
-    file_path = filedialog.askopenfilename(title="Select Fingerprint Image", filetypes=[("Image Files", "*.bmp;*.png;*.jpg;*.jpeg")])
+    file_path = filedialog.askopenfilename(title="Select Fingerprint Image", filetypes=[("Image Files", "*.bmp;*.png;*.jpg;*.jpeg;*.tif")])
     if file_path:
         img = cv2.imread(file_path, 0)
         minutiae_points = minutiae_points_computer(img)
@@ -217,8 +219,8 @@ def select_fingerprint_and_plot():
 def main():
     import os
     base_fp_dir = os.path.join("fingerprint_dataset", "SOCOFing")
-    train_fp_dirs = ["Real", os.path.join("Altered", "Altered-Medium"), os.path.join("Altered", "Altered-Medium"), os.path.join("Altered", "Altered-Hard")]
-    test_fp_dir = os.path.join(base_fp_dir, "Altered", "Altered-Easy")
+    train_fp_dirs = ["Train"]
+    test_fp_dir = os.path.join(base_fp_dir, "Test")
     print("Loading fingerprint training datasets...")
     fp_train_features, fp_train_labels = [], []
     all_train_features = []

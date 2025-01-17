@@ -16,12 +16,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from sklearn.model_selection import GridSearchCV
 from PIL import Image, ImageTk
+import random
+from scipy.interpolate import lagrange
 
 warnings.filterwarnings("ignore")
 
 BLOCK_SIZE = 16
-R = 20           # Number of Minutiae points
-S = 180          # Number of Chaff points
+R = 20  # Number of Minutiae points
+S = 180  # Number of Chaff points
 
 # ============================================
 # 2. PREPROCESSING AND FEATURE EXTRACTION
@@ -63,10 +65,36 @@ def generate_feature_vector(minutiae_points):
 def pad_feature_vectors(feature_vectors, max_length):
     return np.array(
         [np.pad(vector, (0, max_length - len(vector))) if len(vector) < max_length else vector[:max_length] for vector in feature_vectors],
-        dtype=np.int32  # Use a smaller data type
+        dtype=np.int32
     )
+
 # ============================================
-# 3. DATASET PREPARATION
+# 3. FUZZY VAULT FUNCTIONS
+# ============================================
+
+def create_fuzzy_vault(minutiae_points, secret_key, degree=3, chaff_points=180):
+    """Encodes minutiae points into a Fuzzy Vault"""
+    polynomial = np.poly1d(secret_key)
+    genuine_points = [(x, polynomial(x)) for x, _ in minutiae_points]
+    vault = genuine_points[:]
+    while len(vault) < len(minutiae_points) + chaff_points:
+        chaff = (random.randint(0, 255), random.randint(0, 255))
+        if chaff not in genuine_points:
+            vault.append(chaff)
+    random.shuffle(vault)
+    return vault
+
+def decode_fuzzy_vault(query_minutiae, vault, secret_key):
+    """Decodes the Fuzzy Vault using query minutiae and the secret key"""
+    matched_points = [point for point in vault if point in query_minutiae]
+    if len(matched_points) < len(vault) // 2:
+        raise ValueError("Insufficient matching points to reconstruct the polynomial.")
+    x_vals, y_vals = zip(*matched_points)
+    reconstructed_poly = lagrange(x_vals, y_vals)
+    return reconstructed_poly
+
+# ============================================
+# 4. DATASET PREPARATION
 # ============================================
 
 def load_dataset(dataset_dir, is_fingerprint=True):
@@ -116,7 +144,7 @@ def load_dataset(dataset_dir, is_fingerprint=True):
     return np.array(feature_vectors), np.array(labels)
 
 # ============================================
-# 4. TRAINING AND RECOGNITION
+# 5. TRAINING AND RECOGNITION
 # ============================================
 
 def train_recognition_system(X_train, y_train):
@@ -137,14 +165,16 @@ def train_recognition_system(X_train, y_train):
     joblib.dump(clf_best, 'recognition_model.pkl')
     return clf_best
 
-def evaluate_recognition_system(clf, X_test, y_test, dataset_type):
+def evaluate_recognition_system(clf, X_test, y_test, dataset_type, max_train_len):
+    """Ensure X_test features are padded to the same length as the training data."""
+    X_test = pad_feature_vectors(X_test, max_train_len)
     accuracy = accuracy_score(y_test, clf.predict(X_test)) * 100
     print(f"{dataset_type} Recognition Accuracy: {accuracy:.2f}%")
     show_accuracy_window(accuracy, dataset_type)
     return accuracy
 
 # ============================================
-# 5. GUI, PLOT AND MAIN FUNCTION
+# 6. GUI, PLOT AND MAIN FUNCTION
 # ============================================
 
 def show_accuracy_window(accuracy, dataset_type):
@@ -217,7 +247,6 @@ def select_fingerprint_and_plot():
         messagebox.showwarning("File Selection", "No file selected. Please select a valid fingerprint image.")
 
 def main():
-    import os
     base_fp_dir = os.path.join("fingerprint_dataset", "SOCOFing")
     train_fp_dirs = ["Train"]
     test_fp_dir = os.path.join(base_fp_dir, "Test")
@@ -226,29 +255,23 @@ def main():
     all_train_features = []
 
     for train_dir in train_fp_dirs:
-        full_train_dir = os.path.join(base_fp_dir, train_dir)
-        features, labels = load_dataset(full_train_dir, is_fingerprint=True)
-        max_length_fp = max([len(vector) for vector in features])
-        padded_features = pad_feature_vectors(features, max_length_fp)
-        
-        fp_train_features.append(padded_features)
-        fp_train_labels.append(labels)
-        all_train_features.extend(padded_features)  # Flatten to get all features together
+        fp_train_features, fp_train_labels = load_dataset(os.path.join(base_fp_dir, train_dir))
+        all_train_features.extend(fp_train_features)
 
-    max_length_fp = max([len(vector) for vector in all_train_features])
-    X_train_fp = np.concatenate([pad_feature_vectors(features, max_length_fp) for features in fp_train_features], axis=0)
-    y_train_fp = np.concatenate(fp_train_labels, axis=0)
-    print("Loading fingerprint testing dataset...")
-    X_test_fp, y_test_fp = load_dataset(test_fp_dir, is_fingerprint=True)
-    X_test_fp = pad_feature_vectors(X_test_fp, max_length_fp)
-    print("Normalizing features...")
-    scaler = StandardScaler()
-    X_train_fp = scaler.fit_transform(X_train_fp)
-    X_test_fp = scaler.transform(X_test_fp)   
-    print("Training fingerprint recognition system...")
-    clf_fp = train_recognition_system(X_train_fp, y_train_fp)
-    print("Evaluating fingerprint recognition system...")
-    evaluate_recognition_system(clf_fp, X_test_fp, y_test_fp, "Fingerprint")
+    fp_train_features = np.array(all_train_features)
+    max_train_len = max(len(v) for v in fp_train_features)  # Get the maximum length of the training vectors
+    print("Training Recognition System...")
+    clf_fp = train_recognition_system(fp_train_features, fp_train_labels)
+    print("Evaluating recognition system on test data...")
+    fp_test_features, fp_test_labels = load_dataset(test_fp_dir)
+    fp_test_features = np.array(fp_test_features)
+
+    print("Evaluating Fingerprint Dataset Recognition")
+    evaluate_recognition_system(clf_fp, fp_test_features, fp_test_labels, "Fingerprint", max_train_len)
+
+# ============================================
+# 7. RUN THE PROGRAM
+# ============================================
 
 root = tk.Tk()
 root.title("Fingerprint Recognition System")
